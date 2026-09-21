@@ -220,7 +220,35 @@ let on_vb (module LL : LL.S) (module TD : TOP_DEFS) : ANF.vb -> _ =
         rez)
     | EComplex c -> gen_c c
   in
+  let gen_hot_counter the_module the_function func_name =
+    let counter_name = func_name ^ "_hot" in
+    let counter_global =
+      Llvm.define_global counter_name (Llvm.const_int i64_typ 0) the_module
+    in
+    let entry_bb = Llvm.basic_blocks the_function in
+    (*TODO: get exactrly the entry block*)
+    let first_instr = Llvm.instr_begin entry_bb.(0) in
+    let _ = Llvm.position_builder first_instr LL.builder in
+    let current_count =
+      Llvm.build_load i64_typ counter_global "__cur_hot_count" LL.builder
+    in
+    let one = Llvm.const_int i64_typ 1 in
+    let new_count = Llvm.build_add current_count one "__new_hot_count" LL.builder in
+    let _ = Llvm.build_store new_count counter_global LL.builder in
+    let threshold_val = 100 in
+    let threshold = Llvm.const_int i64_typ threshold_val in
+    let is_hot = Llvm.build_icmp Llvm.Icmp.Eq new_count threshold "is_hot" LL.builder in
+    let hot_bb = Llvm.append_block LL.context "hot_trigger_jit" the_function in
+    let cont_bb = Llvm.append_block LL.context "cold_continue" the_function in
+    let _ = Llvm.build_cond_br is_hot hot_bb cont_bb LL.builder in
+    let _ = Llvm.position_at_end hot_bb LL.builder in
+    let f, typ = top_look_exn "myputc" in
+    let _ = LL.build_call typ f [ Llvm.const_int i64_typ 0x2a ] in
+    let _ = Llvm.build_ret (Llvm.const_int i64_typ 0) LL.builder in
+    ()
+  in
   let args, body = ANF.group_abstractions body in
+
   let fun_typ =
     let args = Array.make (List.length args) i64_typ in
     Llvm.function_type i64_typ args
@@ -240,25 +268,26 @@ let on_vb (module LL : LL.S) (module TD : TOP_DEFS) : ANF.vb -> _ =
   in
   let return_val = gen body in
   let (_ : Llvm.llvalue) = Llvm.build_ret return_val LL.builder in
+  gen_hot_counter LL.module_ the_function name.hum_name;
 
   (* log "@[%a@]\n===\n" LL.pp_value the_function; *)
   (* Llvm.dump_value the_function; *)
 
   (* Validate the generated code, checking for consistency. *)
-  (match Llvm_analysis.verify_function the_function with
-   | true ->
-     (* We register function to be able to discover it below.
+  (* match Llvm_analysis.verify_function the_function with
+  | true ->
+    (* We register function to be able to discover it below.
          TODO: for recursive functions it may be not enough.
-     *)
-     TD.add name.hum_name fun_typ
-   | false ->
-     Stdlib.Format.printf
-       "invalid function generated\n%s\n"
-       (Llvm.string_of_llvalue the_function);
-     Llvm_analysis.assert_valid_function the_function);
-  (* Optimize the function. TODO *)
-  (* let (_ : bool) = Llvm.PassManager.run_function the_function the_fpm in *)
-  (* Llvm.dump_value the_function; *)
+    *)
+    TD.add name.hum_name fun_typ
+  | false ->
+    Stdlib.Format.printf
+      "invalid function generated\n%s\n"
+      (Llvm.string_of_llvalue the_function);
+    Llvm_analysis.assert_valid_function the_function;
+    (* Optimize the function. TODO *)
+    (* let (_ : bool) = Llvm.PassManager.run_function the_function the_fpm in *)
+    Llvm.dump_value the_function; *)
   ()
 ;;
 
@@ -348,5 +377,105 @@ let codegen : ANF.vb list -> _ =
   (* prepare_main (); *)
   List.iter (on_vb (module LL) (module Top_defs : TOP_DEFS)) anf;
   Llvm.print_module out_file the_module;
+  Result.ok ()
+;;
+
+let codegen_jit =
+  fun anf ->
+  let context = Llvm.global_context () in
+  let builder = Llvm.builder context in
+  let () = assert (Llvm_executionengine.initialize ()) in
+  let the_module = Llvm.create_module context "main" in
+  let module LL = (val LL.make context builder the_module) in
+  let i64_type = Llvm.i64_type context in
+  let lama_ptr_type = Llvm.pointer_type context in
+  let _prepare_main () =
+    let ft =
+      (* TODO main has special args *)
+      let args = Array.make 0 lama_ptr_type in
+      Llvm.function_type i64_type args
+    in
+    let the_function = Llvm.declare_function "main" ft the_module in
+    (* Create a new basic block to start insertion into. *)
+    let bb = Llvm.append_block context "entry" the_function in
+    Llvm.position_at_end bb builder;
+    (* Add all arguments to the symbol table and create their allocas. *)
+    (* Finish off the function. *)
+    let return_val =
+      let c = Llvm.const_int i64_type 0x30 in
+      (* let __ () =
+           Llvm.(
+             build_call
+               (lookup_function "printf" the_module |> Option.get)
+               [| const_stringz context "%d"; c |])
+             "" builder
+         in *)
+      let _ =
+        let f = LL.lookup_func_exn "myputc" in
+        let typ = Llvm.function_type (Llvm.void_type context) [| i64_type |] in
+        LL.build_call typ f [ c ]
+      in
+      Llvm.const_int i64_type 0
+    in
+    let (_ : Llvm.llvalue) = Llvm.build_ret return_val builder in
+    (* Validate the generated code, checking for consistency. *)
+    (match Llvm_analysis.verify_function the_function with
+     | true -> ()
+     | false ->
+       Stdlib.Format.printf
+         "invalid function generated\n%s\n"
+         (Llvm.string_of_llvalue the_function);
+       Llvm_analysis.assert_valid_function the_function);
+    (* Optimize the function. *)
+    let (_ : bool) = Llvm_analysis.verify_function the_function in
+    (* Llvm.dump_value the_function; *)
+    ()
+  in
+  let declare_primitive name typ =
+    Top_defs.add name typ;
+    Llvm.declare_function name typ the_module
+  in
+  let _ =
+    declare_primitive
+      "myputc"
+      (Llvm.function_type (Llvm.void_type context) [| i64_type |])
+  in
+  let _ =
+    (* void* lama_applyN(void* f, int32_t, ...) *)
+    declare_primitive
+      "rukaml_applyN"
+      (Llvm.var_arg_function_type i64_type [| i64_type; i64_type |])
+  in
+  let _ =
+    declare_primitive
+      "rukaml_alloc_closure"
+      (Llvm.function_type i64_type [| i64_type; i64_type |])
+  in
+  let _ =
+    declare_primitive
+      "rukaml_alloc_pair"
+      (Llvm.function_type i64_type [| i64_type; i64_type |])
+  in
+  let _ =
+    declare_primitive
+      "rukaml_field"
+      (* TODO: Should first argument be untagged?  *)
+      (Llvm.function_type i64_type [| i64_type; i64_type |])
+  in
+  (* prepare_main (); *)
+  List.iter (on_vb (module LL) (module Top_defs : TOP_DEFS)) anf;
+
+  (* Create engine bound to the "main" module. *)
+  let engine = Llvm_executionengine.create the_module in
+
+  (* Create pointer to the "main" function type. *)
+  let open Ctypes in
+  let main_fn_typ = void @-> returning int64_t in
+  let main_ptr_typ = Foreign.funptr main_fn_typ in
+  let main_func = Llvm_executionengine.get_function_address "main" main_ptr_typ engine in
+  let ret_code = main_func () |> Int64.to_int in
+
+  Llvm_executionengine.dispose engine;
+  Printf.printf "%i" ret_code;
   Result.ok ()
 ;;

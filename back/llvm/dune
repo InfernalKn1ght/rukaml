@@ -20,6 +20,8 @@
   llvm.executionengine
   llvm.target
   llvm.all_backends
+  ctypes
+  ctypes.foreign
   LL
   compile_lib
   cconv)

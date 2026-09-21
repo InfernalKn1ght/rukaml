@@ -110,6 +110,12 @@ module Compiler = struct
     k (Code f)
   ;;
 
+  let jit (ANF stru) =
+    (* print_endline "fuck"; *)
+    let f ~path = LLVM_impl.codegen_jit stru |> Result.ok_or_failwith in
+    k (Code f)
+  ;;
+
   (** Put the text result of the functions above to file *)
   let to_file : type a. string -> a t -> unit =
     fun path ->
@@ -151,6 +157,7 @@ module Target = struct
   let rv64 p = (Intermediate.anftree p) rv64
   let amd64 p = (Intermediate.anftree p) amd64
   let llvm p = (Intermediate.anftree p) llvm
+  let jit p = (Intermediate.anftree p) jit
 
   let finish target p = (target p) (to_file p.out_path)
 
@@ -165,6 +172,7 @@ module Target = struct
       ; "cconv", finish Intermediate.cconvtree
       ; "typedtree", finish Intermediate.typedtree
       ; "anf", finish Intermediate.anftree
+      ; "jit", finish jit
       ]
   ;;
 end
@@ -183,7 +191,7 @@ let hack = function
   | "amd64" ->
     Compile_lib.ANF.disable_arity_inline ();
     Compile_lib.ANF.disable_cmp_into_if_inline ()
-  | "llvm" -> Compile_lib.ANF.disable_arity_inline ()
+  | "llvm" | "jit" -> Compile_lib.ANF.disable_arity_inline ()
   | _ -> ()
 ;;
 
