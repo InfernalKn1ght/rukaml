@@ -33,5 +33,4 @@
   (alias_rec front/all)
   (alias_rec middle/all)
   (alias_rec back/all)
-  (alias_rec driver/all)
-  (alias_rec jit/all)))
+  (alias_rec driver/all)))
