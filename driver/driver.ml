@@ -110,6 +110,16 @@ module Compiler = struct
     k (Code f)
   ;;
 
+  (** Generate serialized LLVM IR payload for the ORC JIT target
+      (no code emission: the payload is handed to [jit/] as-is) *)
+  let jit (ANF stru) =
+    let f ~path =
+      let ir = LLVM_impl.anf_to_ir stru in
+      Out_channel.write_all path ~data:(IR.payload ir)
+    in
+    k (Code f)
+  ;;
+
   (** Put the text result of the functions above to file *)
   let to_file : type a. string -> a t -> unit =
     fun path ->
@@ -151,6 +161,7 @@ module Target = struct
   let rv64 p = (Intermediate.anftree p) rv64
   let amd64 p = (Intermediate.anftree p) amd64
   let llvm p = (Intermediate.anftree p) llvm
+  let jit p = (Intermediate.anftree p) jit
 
   let finish target p = (target p) (to_file p.out_path)
 
@@ -160,6 +171,7 @@ module Target = struct
       [ "rv64", finish rv64
       ; "amd64", finish amd64
       ; "llvm", finish llvm
+      ; "jit", finish jit
       ; "parsetree", finish Intermediate.parsetree
       ; ("cps", fun p -> finish Intermediate.cpstree { p with cps = true })
       ; "cconv", finish Intermediate.cconvtree
@@ -183,7 +195,7 @@ let hack = function
   | "amd64" ->
     Compile_lib.ANF.disable_arity_inline ();
     Compile_lib.ANF.disable_cmp_into_if_inline ()
-  | "llvm" -> Compile_lib.ANF.disable_arity_inline ()
+  | "llvm" | "jit" -> Compile_lib.ANF.disable_arity_inline ()
   | _ -> ()
 ;;
 
