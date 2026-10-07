@@ -4,6 +4,13 @@ open Stdio
 open Frontend
 open Compile_lib
 
+(** The abstract JIT-backend contract lives in [jit/jit_egine/JITEngine];
+    the driver picks the ORC implementation and talks to the JIT only
+    through that contract — never to the low-level C bindings directly.
+    The annotation is the compiler-checked proof that [OrcEngine]
+    implements the contract. *)
+module Engine : JIT_engine_lib.JITEngine.BackEngine = JIT_orc_lib.OrcEngine
+
 let error fmt =
   let open Stdlib.Format in
   kfprintf
@@ -110,19 +117,11 @@ module Compiler = struct
     k (Code f)
   ;;
 
-  (** Generate serialized LLVM IR payload for the ORC JIT target
-      (no code emission: the payload is handed to [jit/] as-is) *)
-  let jit (ANF stru) =
-    let f ~path =
-      let ir = LLVM_impl.anf_to_ir stru in
-      Out_channel.write_all path ~data:(IR.payload ir)
-    in
-    k (Code f)
-  ;;
-
-  (** Put the text result of the functions above to file *)
-  let to_file : type a. string -> a t -> unit =
-    fun path ->
+  (** Put the text result of the functions above to file
+      ([-o] defaults to "a.out" when not given) *)
+  let to_file : type a. string option -> a t -> unit =
+    fun out ->
+    let path = Option.value out ~default:"a.out" in
     let with_ppf f =
       (* for some reason pprint struggles with writing
          directly to file so i'm doing it the ugly way *)
@@ -142,7 +141,7 @@ end
 module Target = struct
   type params =
     { text : string
-    ; out_path : string
+    ; out_path : string option
     ; cps : bool
     ; caa : bool
     }
@@ -161,7 +160,21 @@ module Target = struct
   let rv64 p = (Intermediate.anftree p) rv64
   let amd64 p = (Intermediate.anftree p) amd64
   let llvm p = (Intermediate.anftree p) llvm
-  let jit p = (Intermediate.anftree p) jit
+  let jit p =
+    (Intermediate.anftree p) (fun (ANF stru) ->
+      let ir = LLVM_impl.anf_to_ir stru in
+      Option.iter p.out_path ~f:(fun path ->
+        Out_channel.write_all path ~data:(IR.payload ir));
+      let engine = Engine.create () in
+      Engine.load engine ir;
+      let code =
+        try Engine.run engine "main" with
+        | Failure msg -> error "jit error: %s" msg
+      in
+      Engine.close engine;
+      let n : int = Int64.to_int_trunc code in
+      Stdlib.exit n)
+  ;;
 
   let finish target p = (target p) (to_file p.out_path)
 
@@ -171,7 +184,7 @@ module Target = struct
       [ "rv64", finish rv64
       ; "amd64", finish amd64
       ; "llvm", finish llvm
-      ; "jit", finish jit
+      ; "jit", jit
       ; "parsetree", finish Intermediate.parsetree
       ; ("cps", fun p -> finish Intermediate.cpstree { p with cps = true })
       ; "cconv", finish Intermediate.cconvtree
@@ -201,14 +214,14 @@ let hack = function
 
 let () =
   let inp_path = ref None in
-  let out_path = ref "a.out" in
+  let out_path = ref None in
   let target = ref "" in
   let cps = ref false in
   let caa = ref false in
 
   let open Stdlib.Arg in
   let args =
-    [ "-o", Set_string out_path, " output file"
+    [ "-o", String (fun s -> out_path := Some s), " output file"
     ; "--target", Set_string target, " compilation target"
     ; "--print-targets", Unit print_targets, " print all supported targets"
     ; "--cps", Set cps, " enable cps conversion"

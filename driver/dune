@@ -9,4 +9,6 @@
   rv64_impl
   amd64_impl
   llvm_impl
-  IR))
+  IR
+  JIT_engine_lib
+  JIT_orc_lib))
