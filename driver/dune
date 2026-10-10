@@ -11,4 +11,5 @@
   llvm_impl
   IR
   JIT_engine_lib
-  JIT_orc_lib))
+  JIT_orc_lib
+  JIT_opt_lib))
